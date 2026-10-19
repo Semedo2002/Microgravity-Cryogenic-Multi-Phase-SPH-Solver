@@ -1,0 +1,29 @@
+# Build trees (in-repo builds; the WSL development trees live in ~/cryosph-build/)
+build/
+build-*/
+cryosph-build/
+cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# Run artifacts written by the examples (the out/ directory itself is kept)
+out/**/*.vtk
+out/**/*.csv
+out/**/*.json
+out/**/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Downloaded validation data (fetch with validation/*/fetch_data.py)
+validation/**/data/

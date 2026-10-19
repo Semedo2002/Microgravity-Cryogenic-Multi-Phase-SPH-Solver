@@ -1,0 +1,3 @@
+# The code is built from WSL/Linux: keep LF line endings in the working tree.
+* text=auto eol=lf
+*.png binary
