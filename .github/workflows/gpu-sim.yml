@@ -1,0 +1,95 @@
+name: GPU simulator
+
+# Optional, non-required check. The hosted runners have no GPU, so the CUDA
+# job in ci.yml only compiles. This builds the CUDA backend and runs the
+# GoogleTest binaries that use the device on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim). A simulator cannot reproduce
+# hardware-specific behavior or timing, so it complements real-GPU testing and
+# does not replace it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "include/**"
+      - "src/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: gpu-sim-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-tests:
+    name: CUDA backend tests (CUDA 12.6, simulated H100)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@deff5781e8adfd83dec98dd5242dcbc96a564773 # v0.1.10
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "12.6"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ libgtest-dev
+
+      # The simulator runs PTX, so 90-virtual (compute_90 PTX only) replaces
+      # the default architecture list, and it needs a shared CUDA runtime.
+      - name: Configure
+        run: |
+          set -o pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCRYOSPH_ENABLE_CUDA=ON -DCRYOSPH_BUILD_PYTHON=OFF \
+            -DCRYOSPH_FETCH_DEPENDENCIES=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES=90-virtual -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared \
+            2>&1 | tee configure.log
+          grep -q 'CUDA backend enabled' configure.log
+
+      - name: Build
+        run: cmake --build build -j3
+
+      # The tests print no device line of their own, so the benchmark driver
+      # (which prints the device name, "CPU (OpenMP" on the CPU backend) is run
+      # first as a short smoke test and its device line must name the H100.
+      - name: Check the backend runs on the simulated device
+        run: |
+          set -o pipefail
+          vgpu run ./build/cryosph_perf --dx 0.01 --steps 3 2>&1 | tee perf.log
+          grep -q 'virtual GPU platform initialized' perf.log
+          grep -q 'benchmark on .*H100.*(sm_90)' perf.log
+          if grep -E 'VirtualGPU error|CUDA error|failed:|CPU \(' perf.log; then
+            echo "unexpected output"; exit 1
+          fi
+
+      # Each binary must report PASSED, and a skipped or failed test, a
+      # VirtualGPU error or a CUDA error fails the job. Tolerances are the
+      # project's own and are not changed here. test_kernels, test_geometry,
+      # test_io and test_maneuver's profile checks run on the host only and
+      # are covered by ci.yml.
+      - name: Run the CUDA backend tests
+        run: |
+          set -o pipefail
+          for t in test_spatial_hash test_hydrostatic test_conservation test_determinism; do
+            echo "::group::$t"
+            timeout 3000 vgpu run ./build/tests/$t 2>&1 | tee $t.log
+            grep -q 'virtual GPU platform initialized' $t.log
+            grep -q '^\[  PASSED  \]' $t.log
+            if grep -E 'VirtualGPU error|CUDA error|SKIPPED|FAILED' $t.log; then
+              echo "unexpected output in $t"; exit 1
+            fi
+            echo "::endgroup::"
+          done
